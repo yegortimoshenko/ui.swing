@@ -6,9 +6,10 @@
            [java.awt Color Component Dimension Font Insets]
            java.awt.event.ActionListener
            java.util.List
-           [javax.swing JButton JCheckBox JComponent JFileChooser JFrame JLabel
+           [javax.swing JButton JCheckBox JComboBox JComponent JFileChooser JFrame JLabel
             JList JPanel JPasswordField JProgressBar JScrollPane JSlider JTable
-            JTextArea JTextField DefaultListModel SwingConstants SwingUtilities]
+            JTextArea JTextField DefaultComboBoxModel DefaultListModel
+            SwingConstants SwingUtilities]
            javax.swing.table.DefaultTableModel
            javax.swing.text.JTextComponent))
 
@@ -30,11 +31,14 @@
   (let [this (with-meta 'this {:tag proto})]
     `(proxy [~proto ~@(if g `[IDeref]) ~@(if s `[IAtom])] [~@args]
        ~@(if g `[(deref [] (invoke (~g ~this)))])
-       ~@(if s `[(compareAndSet [old# new#] (invoke (if (= old# (~g ~this)) (do (~s ~this new#) true) false)))
+       ~@(if s `[(compareAndSet [old# new#] (invoke (let [same?# (= old# (~g ~this))]
+                                                      (if same?# (~s ~this new#)) same?#)))
                  (reset [new#] (invoke (~s ~this new#) (~g ~this)))
-                 (swap [f# & args#] (loop [] (let [old# (.deref ~(with-meta 'this {:tag `IDeref}))
+                 (swap [f# & args#] (loop [] (let [old# (deref ~this)
                                                    new# (apply f# old# args#)]
-                                               (if-let [res# (invoke (when (= old# (~g ~this)) (~s ~this new#) (~g ~this)))] res# (recur)))))]))))
+                                               (if-let [res# (invoke (when (= old# (~g ~this))
+                                                                       (~s ~this new#)
+                                                                       (~g ~this)))] res# (recur)))))]))))
 
 (defprotocol IColor
   (to-color ^Color [this]))
@@ -68,7 +72,7 @@
   `(fn [^JComponent c# ^Dimension d#] (~m c# d#)))
 
 (defn- style
-  [^JComponent c
+  [^Component c
    {:keys [width height
            pref-width pref-height
            min-width min-height
@@ -85,8 +89,8 @@
       :foreground (.setForeground c (to-color v))
       :enabled? (.setEnabled c ^Boolean v)
       :font (.setFont c (to-font v))
-      :opaque? (.setOpaque c ^Boolean v)
-      :tooltip (.setToolTipText c ^String v)
+      :opaque? (.setOpaque ^JComponent c ^Boolean v)
+      :tooltip (.setToolTipText ^JComponent c ^String v)
       :visible? (.setVisible c ^Boolean v)
       :default)))
 
@@ -101,37 +105,41 @@
                            (.showOpenDialog this parent)))
                   (.getSelectedFile this))))))
 
-(defn show! [^Component c]
-  (invoke (.setVisible c true)))
-
-(defn hide! [^Component c]
-  (invoke (.setVisible c false)))
-
 (defn frame
   ([c] (frame {} c))
-  ([{:keys [resizable? title] :as opts} c]
+  ([{:keys [resizable? submit title visible?] :or {} :as opts} c]
    (let [f (JFrame. ^String title)]
      (if resizable? (.setResizable f resizable?))
+     (if submit (-> f .getRootPane (.setDefaultButton submit)))
      (if c (.add f ^Component c))
-     (doto f .pack (style opts)))))
+     (doto f .pack (style (conj opts (when (nil? visible?) [:visible? true])))))))
 
 (defn scrollable [c]
   (JScrollPane. c))
 
-(defn- from-list-model [^DefaultListModel model]
-  (vec (.toArray model)))
+(defn- from-model [^DefaultComboBoxModel m]
+  (vec (for [i (range (.getSize m))] (.getElementAt m i))))
 
-(defn- to-list-model [xs]
-  (let [model (DefaultListModel.)]
-    (doseq [x xs] (.addElement model x)) model))
+(defn- to-model ^DefaultComboBoxModel [xs]
+  (let [m (DefaultComboBoxModel.)]
+    (doseq [x xs] (.addElement m x)) m))
+
+(defn combo-box
+  ([] (combo-box []))
+  ([xs] (combo-box {} xs))
+  ([opts xs]
+   (let [c (component JComboBox [(to-model xs)]
+                      (fn [^JComboBox this] (from-model (.getModel this)))
+                      (fn [^JComboBox this ys] (.setModel this (to-model ys))))]
+     (doto c (style opts)))))
 
 (defn list
   ([] (list []))
   ([xs] (list {} xs))
   ([opts xs]
-   (let [c (component JList [^DefaultListModel (to-list-model xs)]
-                      (fn [^JList this] (from-list-model (.getModel this)))
-                      (fn [^JList this ys] (.setModel this (to-list-model ys))))]
+   (let [c (component JList [(to-model xs)]
+                      (fn [^JList this] (from-model (.getModel this)))
+                      (fn [^JList this ys] (.setModel this (to-model ys))))]
      (doto c (style opts)))))
 
 (defn- from-table-model [^DefaultTableModel model]
