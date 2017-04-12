@@ -1,4 +1,4 @@
-(ns yegortimoshenko.swing
+(ns yegortimoshenko.ui.swing
   (:refer-clojure :exclude [list])
   (:require [clojure.set :as set]
             [clojure.string :as str])
