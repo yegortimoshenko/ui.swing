@@ -1,16 +1,16 @@
 (ns yegortimoshenko.ui.swing
-  (:refer-clojure :exclude [list])
-  (:require [clojure.set :as set]
-            [clojure.string :as str])
-  (:import [net.miginfocom.layout AC CC LC]
-           [net.miginfocom.swing MigLayout]
-           [java.awt Component Dimension Insets Window]
-           [javax.swing AbstractButton JButton JCheckBox JComboBox JComponent JEditorPane
-            JFrame JLabel JList JPanel JPasswordField JProgressBar JScrollPane JSlider
-            JSpinner JTable JTextArea JTextField DefaultComboBoxModel DefaultListCellRenderer
-            SwingConstants SwingUtilities]
-           [javax.swing.table DefaultTableModel DefaultTableCellRenderer TableCellEditor]
-           [javax.swing.text JTextComponent GapContent PlainDocument]))
+  (:refer-clojure :exclude [get list])
+  (:require (clojure [set :as set] [string :as str]))
+  (:import (java.awt Component Dimension Insets Window)
+           (javax.swing AbstractButton JButton JCheckBox JComboBox JComponent JEditorPane
+                        JFrame JLabel JList JPanel JPasswordField JProgressBar JScrollPane JSlider
+                        JSpinner JTable JTextArea JTextField DefaultComboBoxModel DefaultListCellRenderer
+                        SwingConstants SwingUtilities)
+           (javax.swing.table DefaultTableModel DefaultTableCellRenderer TableCellEditor)
+           (javax.swing.text JTextComponent GapContent PlainDocument)
+           (net.miginfocom.swing MigLayout)))
+
+(alias 'this *ns*)
 
 (defprotocol Listener
   (attach [this component]))
@@ -49,7 +49,7 @@
          (when-not (empty? ~handlers)
            (attach (reify ~interface
                      ~@(for [method methods]
-                         `(~method [_# e#] ((get ~handlers (quote ~method) ~nop) e#)))) component#))))))
+                         `(~method [_# e#] ((or (~handlers (quote ~method)) ~nop) e#)))) component#))))))
 
 (defn ^:private class->symbol [^Class k]
   (symbol (.getName k)))
@@ -177,9 +177,9 @@
 (defn scrollable [c]
   (JScrollPane. c))
 
-(defprotocol Place
-  (withdraw [this])
-  (deposit [this v]))
+(defprotocol Slot
+  (get [this])
+  (set! [this v]))
 
 (defmacro invoke [& body]
   `(if (SwingUtilities/isEventDispatchThread)
@@ -188,23 +188,23 @@
        (SwingUtilities/invokeAndWait #(reset! a# (do ~@body)))
        (deref a#))))
 
-(defn ->atom [place]
-  {:pre [(satisfies? Place place)]}
+(defn ->atom [slot]
+  {:pre [(satisfies? Slot slot)]}
   (reify
     clojure.lang.IDeref
-    (deref [_] (invoke (withdraw place)))
+    (deref [_] (invoke (this/get slot)))
     clojure.lang.IAtom
     (compareAndSet [_ old new]
-      (invoke (let [same? (= old (withdraw place))]
-                (if same? (deposit place new)) same?)))
+      (invoke (let [same? (= old (this/get slot))]
+                (if same? (this/set! slot new)) same?)))
     (reset [_ new]
-      (invoke (deposit place new) (withdraw place)))
+      (invoke (this/set! slot new) (this/get slot)))
     (swap [this f & args]
       (loop [] (let [old (deref this)
                      new (apply f old args)]
-                 (or (invoke (when (= old (withdraw place))
-                               (deposit place new)
-                               (withdraw place)))
+                 (or (invoke (when (= old (this/get slot))
+                               (this/set! slot new)
+                               (this/get slot)))
                      (recur)))))))
 
 (defn ^:private from-model [^DefaultComboBoxModel m]
@@ -232,10 +232,10 @@
 (extend-protocol Field
   JPasswordField
   (field [this]
-    (reify Place
-      (withdraw [_] (.getPassword this))
+    (reify Slot
+      (get [_] (.getPassword this))
       ^{:doc "https://bugs.openjdk.java.net/browse/JDK-8075513"}
-      (deposit [_ cs1]
+      (set! [_ cs1]
         (let [content
               (proxy [GapContent Resettable] []
                 (reset [^chars cs2]
@@ -245,45 +245,45 @@
           (.setDocument this document)))))
   JTextComponent
   (field [this]
-    (reify Place
-      (withdraw [_] (.getText this))
-      (deposit [_ s] (.setText this s))))
+    (reify Slot
+      (get [_] (.getText this))
+      (set! [_ s] (.setText this s))))
   JComboBox
   (field [this]
-    (reify Place
-      (withdraw [_] (.getSelectedItem this))
-      (deposit [_ v] (.setSelectedItem this v))))
+    (reify Slot
+      (get [_] (.getSelectedItem this))
+      (set! [_ v] (.setSelectedItem this v))))
   JList
   (field [this]
-    (reify Place
-      (withdraw [_] (set (.getSelectedValuesList this)))
-      (deposit [_ s]
+    (reify Slot
+      (get [_] (set (.getSelectedValuesList this)))
+      (set! [_ s]
         (.setSelectedIndices this (int-array (positions s (from-model (.getModel this))))))))
   JTable
   (field [this]
-    (reify Place
-      (withdraw [_]
+    (reify Slot
+      (get [_]
         (let [m (from-table-model (.getModel this))]
           (set (map (partial nth m) (.getSelectedRows this)))))
-      (deposit [_ ys]
+      (set! [_ ys]
         (.clearSelection this)
         (doseq [idx (positions (set ys) (from-table-model (.getModel this)))]
           (.addRowSelectionInterval this idx idx)))))
   JProgressBar
   (field [this]
-    (reify Place
-      (withdraw [_] (.getValue this))
-      (deposit [_ x] (.setValue this ^long x))))
+    (reify Slot
+      (get [_] (.getValue this))
+      (set! [_ x] (.setValue this ^long x))))
   JSlider
   (field [this]
-    (reify Place
-      (withdraw [_] (.getValue this))
-      (deposit [_ x] (.setValue this x))))
+    (reify Slot
+      (get [_] (.getValue this))
+      (set! [_ x] (.setValue this x))))
   JSpinner
   (field [this]
-    (reify Place
-      (withdraw [_] (.getValue this))
-      (deposit [_ x] (.setValue this x)))))
+    (reify Slot
+      (get [_] (.getValue this))
+      (set! [_ x] (.setValue this x)))))
 
 (defn password-field
   ([] (JPasswordField.))
@@ -312,19 +312,19 @@
 (extend-protocol View
   AbstractButton
   (view [this]
-    (reify Place
-      (withdraw [_] (.getText this))
-      (deposit [_ s] (.setText this s))))
+    (reify Slot
+      (get [_] (.getText this))
+      (set! [_ s] (.setText this s))))
   JFrame
   (view [this]
-    (reify Place
-      (withdraw [_] (.getTitle this))
-      (deposit [_ s] (.setTitle this s))))
+    (reify Slot
+      (get [_] (.getTitle this))
+      (set! [_ s] (.setTitle this s))))
   JLabel
   (view [this]
-    (reify Place
-      (withdraw [_] (.getText this))
-      (deposit [_ s] (.setText this s)))))
+    (reify Slot
+      (get [_] (.getText this))
+      (set! [_ s] (.setText this s)))))
 
 (defn button
   ([] (JButton.))
