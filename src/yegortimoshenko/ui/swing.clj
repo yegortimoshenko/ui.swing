@@ -12,6 +12,212 @@
 
 (alias 'this *ns*)
 
+(defn ^:private deep-merge [& maps]
+  (if (every? map? maps)
+    (apply merge-with deep-merge maps)
+    (last maps)))
+
+(def ^:dynamic *frame-visible?* true)
+(def ^:private not-false? (complement false?))
+
+(defn event->window [e]
+  (let [source (.getSource e)]
+    (if (instance? Window source)
+      (identity source)
+      (SwingUtilities/getWindowAncestor source))))
+
+(declare finalize)
+
+(defn frame
+  ([child] (frame {} child))
+  ([{:keys [resizable? title] :as params} child]
+   (doto (JFrame.)
+     (.add ^Component child)
+     (.pack)
+     (.setDefaultCloseOperation JFrame/DO_NOTHING_ON_CLOSE)
+     (.setResizable (not-false? resizable?))
+     (.setTitle title)
+     (finalize (deep-merge {:listeners {:window-closing (fn [e] (.dispose (event->window e)))}
+                            :visible? *frame-visible?*} params)))))
+
+(defn panel
+  ([children] (panel {} children))
+  ([{:keys [layout column row] :as params} children]
+   (let [this (JPanel. (MigLayout. layout column row))]
+     (doseq [child children]
+       (let [[component spec] (if (sequential? child) child [child])]
+         (.add this ^Component component ^Object (str spec))))
+     (finalize this params))))
+
+(defn scrollable [c]
+  (JScrollPane. c))
+
+(defprotocol Place
+  (get [this])
+  (set! [this v]))
+
+(defmacro invoke
+  "Ensures that body is invoked on Swing EDT thread"
+  [& body]
+  `(if (SwingUtilities/isEventDispatchThread)
+     (do ~@body)
+     (let [a# (atom nil)]
+       (SwingUtilities/invokeAndWait #(reset! a# (do ~@body)))
+       (deref a#))))
+
+(defn as-atom [place]
+  (reify
+    clojure.lang.IDeref
+    (deref [_] (invoke (this/get place)))
+    clojure.lang.IAtom
+    (compareAndSet [_ old new]
+      (invoke (let [same? (= old (this/get place))]
+                (if same? (this/set! place new)) same?)))
+    (reset [_ new]
+      (invoke (this/set! place new) (this/get place)))
+    (swap [this f & args]
+      (loop [] (let [old (deref this)
+                     new (apply f old args)]
+                 (or (invoke (when (= old (this/get place))
+                               (this/set! place new)
+                               (this/get place)))
+                     (recur)))))))
+
+(defn ^:private from-model [^DefaultComboBoxModel m]
+  (vec (for [i (range (.getSize m))] (.getElementAt m i))))
+
+(defn ^:private to-model ^DefaultComboBoxModel [xs]
+  (let [m (DefaultComboBoxModel.)]
+    (doseq [x xs] (.addElement m x)) m))
+
+(defn- from-table-model [^DefaultTableModel model]
+  (mapv vec (.getDataVector model)))
+
+(defn- to-table-model ^DefaultTableModel [rows columns]
+  (DefaultTableModel. (to-array-2d rows) (to-array columns)))
+
+(defprotocol Field
+  (field ^Place [this]))
+
+(definterface Resettable
+  (^void reset [^chars cs]))
+
+(defn ^:private positions [pred coll]
+  (for [[idx elt] (map-indexed vector coll) :when (pred elt)] idx))
+
+(extend-protocol Field
+  JPasswordField
+  (field [this]
+    (reify Place
+      (get [_] (.getPassword this))
+      ^{:doc "https://bugs.openjdk.java.net/browse/JDK-8075513"}
+      (set! [_ cs1]
+        (let [content
+              (proxy [GapContent Resettable] []
+                (reset [^chars cs2]
+                  (.replace ^GapContent this 0 0 cs2 ^int (count cs2))))
+              document (PlainDocument. content)]
+          (.reset content ^chars cs1)
+          (.setDocument this document)))))
+  JTextComponent
+  (field [this]
+    (reify Place
+      (get [_] (.getText this))
+      (set! [_ s] (.setText this s))))
+  JCheckBox
+  (field [this]
+    (reify Place
+      (get [_] (.getSelected this))
+      (set! [_ v] (.setSelected this v))))
+  JComboBox
+  (field [this]
+    (reify Place
+      (get [_] (.getSelectedItem this))
+      (set! [_ v] (.setSelectedItem this v))))
+  JList
+  (field [this]
+    (reify Place
+      (get [_] (set (.getSelectedValuesList this)))
+      (set! [_ s]
+        (.setSelectedIndices this (int-array (positions s (from-model (.getModel this))))))))
+  JTable
+  (field [this]
+    (reify Place
+      (get [_]
+        (let [m (from-table-model (.getModel this))]
+          (set (map (partial nth m) (.getSelectedRows this)))))
+      (set! [_ ys]
+        (.clearSelection this)
+        (doseq [idx (positions (set ys) (from-table-model (.getModel this)))]
+          (.addRowSelectionInterval this idx idx)))))
+  JProgressBar
+  (field [this]
+    (reify Place
+      (get [_] (.getValue this))
+      (set! [_ x] (.setValue this ^long x))))
+  JSlider
+  (field [this]
+    (reify Place
+      (get [_] (.getValue this))
+      (set! [_ x] (.setValue this x))))
+  JSpinner
+  (field [this]
+    (reify Place
+      (get [_] (.getValue this))
+      (set! [_ x] (.setValue this x)))))
+
+(defn password-field
+  ([] (JPasswordField.))
+  ([params] (finalize (JPasswordField.) params)))
+
+(defn editor-pane
+  ([] (JEditorPane.))
+  ([params] (finalize (JEditorPane.) params)))
+
+(defn text-area
+  ([] (JTextArea.))
+  ([{:keys [wrap?] :as params}]
+   (let [this (JTextArea.)]
+     (when wrap?
+       (.setLineWrap this true)
+       (.setWrapStyleWord this true))
+     (finalize this params))))
+
+(defn text-field
+  ([] (JTextField.))
+  ([params] (finalize (JTextField.) params)))
+
+(defprotocol View
+  (view ^Place [this]))
+
+(extend-protocol View
+  AbstractButton
+  (view [this]
+    (reify Place
+      (get [_] (.getText this))
+      (set! [_ s] (.setText this s))))
+  JFrame
+  (view [this]
+    (reify Place
+      (get [_] (.getTitle this))
+      (set! [_ s] (.setTitle this s))))
+  JLabel
+  (view [this]
+    (reify Place
+      (get [_] (.getText this))
+      (set! [_ s] (.setText this s)))))
+
+(defn button
+  ([] (JButton.))
+  ([^String s] (JButton. s))
+  ([params ^String s] (finalize (JButton. s) params)))
+
+(defn label
+  ([] (JLabel.))
+  ([^String s] (JLabel. s))
+  ([params ^String s]
+   (finalize (JLabel. s) params)))
+
 (defprotocol Listener
   (attach [this component]))
 
@@ -60,6 +266,8 @@
        (cons 'juxt)
        (eval)))
 
+(listeners (extenders Listener))
+
 (def ^:private listeners-memo (memoize listeners))
 
 (defn listen [component handlers]
@@ -71,34 +279,34 @@
    :right SwingConstants/RIGHT})
 
 (defprotocol Color
-  (->color [this]))
+  (as-color [this]))
 
 (extend-protocol Color
   java.awt.Color
-  (->color [this] this)
+  (as-color [this] this)
   java.util.List
-  (->color [[r g b a]]
+  (as-color [[^int r ^int g ^int b a]]
     (if a
-      (java.awt.Color. r g b a)
+      (java.awt.Color. r g b ^int a)
       (java.awt.Color. r g b))))
 
 (defprotocol Font
-  (->font [this]))
+  (as-font [this]))
 
 (extend-protocol Font
   java.awt.Font
-  (->font [this] this))
+  (as-font [this] this))
 
 (defprotocol Point
-  (->point [this]))
+  (as-point [this]))
 
 (extend-protocol Point
   java.awt.Point
-  (->point [this] this)
+  (as-point [this] this)
   java.awt.Window
-  (->point [this] (.getLocationOnScreen this))
+  (as-point [this] (.getLocationOnScreen this))
   java.util.List
-  (->point [[x y]] (java.awt.Point. x y)))
+  (as-point [[x y]] (java.awt.Point. x y)))
 
 (defn ->dimension
   ([w h]
@@ -127,222 +335,24 @@
   (doseq [[k v] params]
     (case k
       :align (.setHorizontalAlignment c (v alignment))
-      :background (.setBackground c (->color v))
-      :foreground (.setForeground c (->color v))
-      :default (reset! ^clojure.lang.IAtom c v)
+      :background (.setBackground c (as-color v))
+      :foreground (.setForeground c (as-color v))
+      :default (this/set! (field c) v)
       :enabled? (.setEnabled c ^Boolean v)
-      :font (.setFont c (->font v))
+      :font (.setFont c (as-font v))
       :listeners (listen c v)
       :name (.setName c ^String v)
       :opaque? (.setOpaque ^JComponent c ^Boolean v)
       :tooltip (.setToolTipText ^JComponent c ^String v)
       :visible? (.setVisible c ^Boolean v)
-      :default)))
-
-(defn ^:private deep-merge [& maps]
-  (if (every? map? maps)
-    (apply merge-with deep-merge maps)
-    (last maps)))
-
-(def ^:dynamic *frame-visible?* true)
-(def ^:private not-false? (complement false?))
-
-(defn event->window [e]
-  (let [source (.getSource e)]
-    (if (instance? Window source)
-      (identity source)
-      (SwingUtilities/getWindowAncestor source))))
-
-(defn frame
-  ([child] (frame {} child))
-  ([{:keys [resizable? title] :as params} child]
-   (doto (JFrame.)
-     (.add ^Component child)
-     (.pack)
-     (.setDefaultCloseOperation JFrame/DO_NOTHING_ON_CLOSE)
-     (.setResizable (not-false? resizable?))
-     (.setTitle title)
-     (finalize (deep-merge {:listeners {:window-closing (fn [e] (.dispose (event->window e)))}
-                            :visible? *frame-visible?*} params)))))
-
-(defn panel
-  ([children] (panel {} children))
-  ([{:keys [layout column row] :as params} children]
-   (let [this (JPanel. (MigLayout. layout column row))]
-     (doseq [child children]
-       (let [[component spec] (if (sequential? child) child [child])]
-         (.add this ^Component component ^Object (str spec))))
-     (finalize this params))))
-
-(defn scrollable [c]
-  (JScrollPane. c))
-
-(defprotocol Slot
-  (get [this])
-  (set! [this v]))
-
-(defmacro invoke [& body]
-  `(if (SwingUtilities/isEventDispatchThread)
-     (do ~@body)
-     (let [a# (atom nil)]
-       (SwingUtilities/invokeAndWait #(reset! a# (do ~@body)))
-       (deref a#))))
-
-(defn ->atom [slot]
-  {:pre [(satisfies? Slot slot)]}
-  (reify
-    clojure.lang.IDeref
-    (deref [_] (invoke (this/get slot)))
-    clojure.lang.IAtom
-    (compareAndSet [_ old new]
-      (invoke (let [same? (= old (this/get slot))]
-                (if same? (this/set! slot new)) same?)))
-    (reset [_ new]
-      (invoke (this/set! slot new) (this/get slot)))
-    (swap [this f & args]
-      (loop [] (let [old (deref this)
-                     new (apply f old args)]
-                 (or (invoke (when (= old (this/get slot))
-                               (this/set! slot new)
-                               (this/get slot)))
-                     (recur)))))))
-
-(defn ^:private from-model [^DefaultComboBoxModel m]
-  (vec (for [i (range (.getSize m))] (.getElementAt m i))))
-
-(defn ^:private to-model ^DefaultComboBoxModel [xs]
-  (let [m (DefaultComboBoxModel.)]
-    (doseq [x xs] (.addElement m x)) m))
-
-(defn- from-table-model [^DefaultTableModel model]
-  (mapv vec (.getDataVector model)))
-
-(defn- to-table-model ^DefaultTableModel [rows columns]
-  (DefaultTableModel. (to-array-2d rows) (to-array columns)))
-
-(defprotocol Field
-  (field ^Place [this]))
-
-(definterface Resettable
-  (^void reset [^chars cs]))
-
-(defn ^:private positions [pred coll]
-  (for [[idx elt] (map-indexed vector coll) :when (pred elt)] idx))
-
-(extend-protocol Field
-  JPasswordField
-  (field [this]
-    (reify Slot
-      (get [_] (.getPassword this))
-      ^{:doc "https://bugs.openjdk.java.net/browse/JDK-8075513"}
-      (set! [_ cs1]
-        (let [content
-              (proxy [GapContent Resettable] []
-                (reset [^chars cs2]
-                  (.replace ^GapContent this 0 0 cs2 ^int (count cs2))))
-              document (PlainDocument. content)]
-          (.reset content ^chars cs1)
-          (.setDocument this document)))))
-  JTextComponent
-  (field [this]
-    (reify Slot
-      (get [_] (.getText this))
-      (set! [_ s] (.setText this s))))
-  JComboBox
-  (field [this]
-    (reify Slot
-      (get [_] (.getSelectedItem this))
-      (set! [_ v] (.setSelectedItem this v))))
-  JList
-  (field [this]
-    (reify Slot
-      (get [_] (set (.getSelectedValuesList this)))
-      (set! [_ s]
-        (.setSelectedIndices this (int-array (positions s (from-model (.getModel this))))))))
-  JTable
-  (field [this]
-    (reify Slot
-      (get [_]
-        (let [m (from-table-model (.getModel this))]
-          (set (map (partial nth m) (.getSelectedRows this)))))
-      (set! [_ ys]
-        (.clearSelection this)
-        (doseq [idx (positions (set ys) (from-table-model (.getModel this)))]
-          (.addRowSelectionInterval this idx idx)))))
-  JProgressBar
-  (field [this]
-    (reify Slot
-      (get [_] (.getValue this))
-      (set! [_ x] (.setValue this ^long x))))
-  JSlider
-  (field [this]
-    (reify Slot
-      (get [_] (.getValue this))
-      (set! [_ x] (.setValue this x))))
-  JSpinner
-  (field [this]
-    (reify Slot
-      (get [_] (.getValue this))
-      (set! [_ x] (.setValue this x)))))
-
-(defn password-field
-  ([] (JPasswordField.))
-  ([params] (finalize (JPasswordField.) params)))
-
-(defn editor-pane
-  ([] (JEditorPane.))
-  ([params] (finalize (JEditorPane.) params)))
-
-(defn text-area
-  ([] (JTextArea.))
-  ([{:keys [wrap?] :as params}]
-   (let [this (JTextArea.)]
-     (when wrap?
-       (.setLineWrap this true)
-       (.setWrapStyleWord this true))
-     (finalize this params))))
-
-(defn text-field
-  ([] (JTextField.))
-  ([params] (finalize (JTextField.) params)))
-
-(defprotocol View
-  (view ^Place [this]))
-
-(extend-protocol View
-  AbstractButton
-  (view [this]
-    (reify Slot
-      (get [_] (.getText this))
-      (set! [_ s] (.setText this s))))
-  JFrame
-  (view [this]
-    (reify Slot
-      (get [_] (.getTitle this))
-      (set! [_ s] (.setTitle this s))))
-  JLabel
-  (view [this]
-    (reify Slot
-      (get [_] (.getText this))
-      (set! [_ s] (.setText this s)))))
-
-(defn button
-  ([] (JButton.))
-  ([^String s] (JButton. s))
-  ([params ^String s] (finalize (JButton. s) params)))
-
-(defn label
-  ([] (JLabel.))
-  ([^String s] (JLabel. s))
-  ([params ^String s]
-   (finalize (JLabel. s) params)))
+      :default)) c)
 
 (defprotocol Renderable
   (render ^Component [this ctx]))
 
 (extend-protocol Renderable
   Component
-  (render [this _] (if (.getVisible this) this (label))))
+  (render [this _] this))
 
 (defmacro ^:private renderer [klass method binding]
   (let [binding (into (array-map) (map (juxt (comp keyword name) gensym) binding))
@@ -374,9 +384,8 @@
      (.setCellRenderer list-cell-renderer))))
 
 (defn table
-  ([rows] (table {} rows (repeat (count (first rows)) (str))))
-  ([rows columns] (table {} rows columns))
-  ([{:keys [editable?] :as params} rows columns]
+  ([rows] (table {} rows))
+  ([{:keys [columns editable?] :or {columns (repeat (count (first rows)) (str))} :as params} rows]
    (let [this (JTable. (to-table-model rows columns))]
      (if (not editable?) (.setDefaultEditor this Object nil))
      (doto this
