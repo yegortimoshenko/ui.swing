@@ -1,0 +1,1 @@
+{:deps {com.miglayout/miglayout {:mvn/version "3.7.4"}}}
